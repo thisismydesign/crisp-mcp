@@ -660,6 +660,75 @@ export class CrispClient {
     );
   }
 
+  /**
+   * Send a "start"/"stop" composing state. Crisp renders "Operator is
+   * typing…" on the customer side for ~6 seconds after a "start" event,
+   * so long replies need a refresh every few seconds. Caller controls
+   * cadence — this method just forwards the one PATCH.
+   */
+  async setComposingState(
+    sessionId: string,
+    state: "start" | "stop",
+    options: { excerpt?: string; stealth?: boolean; automated?: boolean } = {},
+  ): Promise<void> {
+    await this.request<unknown>(
+      "PATCH",
+      `/website/${this.websiteId}/conversation/${sessionId}/compose`,
+      { type: state, from: "operator", ...options },
+    );
+  }
+
+  /**
+   * Mark messages as read by the operator. Without this, the operator-side
+   * unread counter never decrements and `conversations_awaiting_reply`
+   * keeps resurfacing the same conversation after Ana reviews it.
+   * Optional `fingerprints` limits to specific messages; default clears all.
+   */
+  async markMessagesRead(
+    sessionId: string,
+    options: { fingerprints?: number[]; origin?: string } = {},
+  ): Promise<void> {
+    await this.request<unknown>(
+      "PATCH",
+      `/website/${this.websiteId}/conversation/${sessionId}/read`,
+      {
+        from: "operator",
+        origin: options.origin ?? "chat",
+        ...(options.fingerprints ? { fingerprints: options.fingerprints } : {}),
+      },
+    );
+  }
+
+  /**
+   * Build the Crisp inbox URL for a conversation. Pure string construction —
+   * useful when escalating a ticket to Slack/Linear and the operator needs
+   * a deep link to open the conversation in Crisp's web UI.
+   */
+  getConversationUrl(sessionId: string): string {
+    return `https://app.crisp.chat/website/${this.websiteId}/inbox/${sessionId}/`;
+  }
+
+  /**
+   * Convenience chain: look up a person by email and return their
+   * conversations in a single call. Hides the two-step (find + list)
+   * pattern that Ana was running on nearly every ticket reply.
+   *
+   * Returns `null` if no matching person is found, so the caller doesn't
+   * have to distinguish "no person" from "person with zero conversations".
+   */
+  async findConversationsForEmail(
+    email: string,
+    pageNumber = 1,
+  ): Promise<{ person: PeopleProfile; conversations: PaginatedResult<Conversation> } | null> {
+    const person = await this.findPersonByEmail(email);
+    if (!person?.people_id) return null;
+    const conversations = await this.getPersonConversations(
+      person.people_id,
+      pageNumber,
+    );
+    return { person, conversations };
+  }
+
   // ============================================
   // People (Contacts) — new in this revision
   // ============================================

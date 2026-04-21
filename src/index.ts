@@ -322,6 +322,70 @@ const tools: Tool[] = [
       required: ["session_id"],
     },
   },
+  {
+    name: "resolve_conversation",
+    description: "Shortcut: mark a conversation as resolved. Thin alias over `set_conversation_state`.",
+    inputSchema: {
+      type: "object",
+      properties: { session_id: { type: "string" } },
+      required: ["session_id"],
+    },
+  },
+  {
+    name: "reopen_conversation",
+    description: "Shortcut: move a resolved conversation back to unresolved. Thin alias over `set_conversation_state`.",
+    inputSchema: {
+      type: "object",
+      properties: { session_id: { type: "string" } },
+      required: ["session_id"],
+    },
+  },
+
+  // ── Realtime state ──────────────────────────
+  {
+    name: "set_composing_state",
+    description:
+      "Send a 'typing…' indicator to the customer. Use 'start' just before drafting a long reply so it feels alive; the indicator auto-expires after ~6s, call again to refresh. Use 'stop' to dismiss immediately.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        session_id: { type: "string" },
+        state: { type: "string", enum: ["start", "stop"] },
+        excerpt: {
+          type: "string",
+          description: "Optional preview of what you're typing (customer may see it)",
+        },
+      },
+      required: ["session_id", "state"],
+    },
+  },
+  {
+    name: "mark_messages_read",
+    description:
+      "Mark messages as read by the operator, decrementing the operator-side unread counter. Call this after reviewing a conversation so it stops resurfacing in `conversations_awaiting_reply`.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        session_id: { type: "string" },
+        fingerprints: {
+          type: "array",
+          items: { type: "number" },
+          description: "Optional list of specific message fingerprints. Default: mark all.",
+        },
+      },
+      required: ["session_id"],
+    },
+  },
+  {
+    name: "get_conversation_url",
+    description:
+      "Get the Crisp web app URL for a conversation. No API call — just builds the deep link. Useful for escalations (Slack/Linear/email).",
+    inputSchema: {
+      type: "object",
+      properties: { session_id: { type: "string" } },
+      required: ["session_id"],
+    },
+  },
 
   // ── People (Contacts) ───────────────────────
   {
@@ -331,6 +395,19 @@ const tools: Tool[] = [
     inputSchema: {
       type: "object",
       properties: { email: { type: "string" } },
+      required: ["email"],
+    },
+  },
+  {
+    name: "find_conversations_for_email",
+    description:
+      "Shortcut: resolve a person by email AND return all their conversations in one call. Combines `find_person_by_email` + `get_person_conversations`. Returns null if no match.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        email: { type: "string" },
+        page: { type: "number", description: "Default: 1" },
+      },
       required: ["email"],
     },
   },
@@ -476,7 +553,7 @@ function jsonResult(data: unknown): { content: [{ type: "text"; text: string }] 
 const server = new Server(
   {
     name: "crisp-mcp",
-    version: "1.1.0",
+    version: "1.2.0",
   },
   {
     capabilities: {
@@ -734,6 +811,62 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!sessionId) throw new Error("session_id is required");
         await crispClient.deleteConversation(sessionId);
         return jsonResult({ success: true, deleted: true });
+      }
+
+      case "resolve_conversation": {
+        const sessionId = a.session_id as string;
+        if (!sessionId) throw new Error("session_id is required");
+        await crispClient.setConversationState(sessionId, "resolved");
+        return jsonResult({ success: true, state: "resolved" });
+      }
+
+      case "reopen_conversation": {
+        const sessionId = a.session_id as string;
+        if (!sessionId) throw new Error("session_id is required");
+        await crispClient.setConversationState(sessionId, "unresolved");
+        return jsonResult({ success: true, state: "unresolved" });
+      }
+
+      case "set_composing_state": {
+        const sessionId = a.session_id as string;
+        const state = a.state as "start" | "stop";
+        if (!sessionId || !state) {
+          throw new Error("session_id and state are required");
+        }
+        await crispClient.setComposingState(sessionId, state, {
+          excerpt: a.excerpt as string | undefined,
+        });
+        return jsonResult({ success: true, state });
+      }
+
+      case "mark_messages_read": {
+        const sessionId = a.session_id as string;
+        if (!sessionId) throw new Error("session_id is required");
+        await crispClient.markMessagesRead(sessionId, {
+          fingerprints: a.fingerprints as number[] | undefined,
+        });
+        return jsonResult({ success: true, marked_read: true });
+      }
+
+      case "get_conversation_url": {
+        const sessionId = a.session_id as string;
+        if (!sessionId) throw new Error("session_id is required");
+        return jsonResult({ url: crispClient.getConversationUrl(sessionId) });
+      }
+
+      case "find_conversations_for_email": {
+        const email = a.email as string;
+        if (!email) throw new Error("email is required");
+        const page = (a.page as number) || 1;
+        const res = await crispClient.findConversationsForEmail(email, page);
+        if (!res) return jsonResult(null);
+        return jsonResult({
+          person: formatPerson(res.person),
+          conversations: res.conversations.data.map(formatConversationSummary),
+          page_number: res.conversations.pageNumber,
+          has_more: res.conversations.hasMore,
+          next_page: res.conversations.nextPage,
+        });
       }
 
       // ── People (Contacts) ────────────────────

@@ -152,14 +152,24 @@ Then restart Claude Code. You can now use natural language to manage your Crisp 
 | Tool | Description |
 |------|-------------|
 | `assign_conversation` | Assign to a specific operator (by user_id). |
+| `resolve_conversation` / `reopen_conversation` | One-shot aliases over `set_conversation_state`. |
 | `block_conversation` / `unblock_conversation` | Block/unblock a conversation. |
 | `delete_conversation` | Permanently delete. |
+
+### Realtime & Navigation
+
+| Tool | Description |
+|------|-------------|
+| `set_composing_state` | Send a "typing…" indicator to the customer (start/stop). Auto-expires after ~6s. |
+| `mark_messages_read` | Mark operator-side unread counter as read so conversations stop resurfacing in triage. |
+| `get_conversation_url` | Build the Crisp web app URL for a conversation — useful for Slack/Linear escalations. |
 
 ### People / Contacts
 
 | Tool | Description |
 |------|-------------|
 | `find_person_by_email` | Find a Crisp People profile by email. Returns null if no match. |
+| `find_conversations_for_email` | Shortcut: resolve person + list their conversations in one call. |
 | `get_person` | Full profile by `people_id`. |
 | `get_person_conversations` | All conversations this person has ever had. |
 | `get_person_data` | Custom data dictionary (plan, subscription, etc. pushed in by your app). |
