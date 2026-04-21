@@ -112,53 +112,76 @@ Then restart Claude Code. You can now use natural language to manage your Crisp 
 
 ## Available Tools
 
-### Conversation Management
+### Conversation Discovery
 
 | Tool | Description |
 |------|-------------|
-| `list_conversations` | List conversations with optional filtering (page, search, unresolved, unread) |
-| `get_unresolved_conversations` | Get all unresolved conversations (paginated) |
-| `get_conversation` | Get detailed info about a specific conversation |
-| `search_conversations` | Search conversations by text query |
+| `list_conversations` | Paginated list with filters: search, segment, unresolved_only, unread_only, assigned_to, unassigned_only, mention_only, order_by_waiting. Returns `{ conversations, page_number, has_more, next_page }`. |
+| `get_unresolved_conversations` | All unresolved across multiple pages (flat array). |
+| `conversations_awaiting_reply` | **Best triage tool.** Unresolved AND customer is waiting on an operator reply. Sorted longest-wait first. |
+| `conversations_assigned_to_me` | Conversations assigned to a specific operator (pass user_id). |
+| `conversations_by_segment` | Conversations tagged with a specific segment (e.g. `refund`, `bug`). |
+| `search_conversations` | Plain-text search. |
 
-### Messages
+### Conversation Detail
 
 | Tool | Description |
 |------|-------------|
-| `get_messages` | Get messages from a conversation |
-| `get_conversation_with_messages` | Get conversation and messages formatted for analysis |
-| `send_message` | Send a message (text or internal note) to a conversation |
+| `get_conversation` | Detailed info about a specific conversation. |
+| `get_messages` | Message history. File/image/audio messages have their URLs surfaced cleanly. |
+| `get_conversation_with_messages` | Plain-text formatted transcript for analysis (small context). |
+| `get_rich_context` | **Heavy context**: conversation + messages + Crisp People profile + past conversations from same customer + custom data, all in one call. Replaces 4-5 round trips. |
+
+### Messaging
+
+| Tool | Description |
+|------|-------------|
+| `send_message` | Send text or internal note. Supports `mentions` for @-tagging operators. |
+| `send_file_message` | Attach a file by URL (no upload needed — pass any publicly hosted URL). |
 
 ### Conversation State
 
 | Tool | Description |
 |------|-------------|
-| `set_conversation_state` | Change state (pending, unresolved, resolved) |
-| `update_conversation_meta` | Update metadata (email, nickname, subject, segments) |
-| `add_segments` | Add tags/segments to a conversation |
-| `remove_segments` | Remove tags/segments from a conversation |
+| `set_conversation_state` | Change state (pending, unresolved, resolved). |
+| `update_conversation_meta` | Update metadata (email, nickname, subject, segments). |
+| `add_segments` / `remove_segments` | Add or remove tags. |
 
 ### Conversation Actions
 
 | Tool | Description |
 |------|-------------|
-| `assign_conversation` | Assign to a specific operator |
-| `block_conversation` | Block a conversation |
-| `unblock_conversation` | Unblock a conversation |
-| `delete_conversation` | Permanently delete a conversation |
+| `assign_conversation` | Assign to a specific operator (by user_id). |
+| `block_conversation` / `unblock_conversation` | Block/unblock a conversation. |
+| `delete_conversation` | Permanently delete. |
+
+### People / Contacts
+
+| Tool | Description |
+|------|-------------|
+| `find_person_by_email` | Find a Crisp People profile by email. Returns null if no match. |
+| `get_person` | Full profile by `people_id`. |
+| `get_person_conversations` | All conversations this person has ever had. |
+| `get_person_data` | Custom data dictionary (plan, subscription, etc. pushed in by your app). |
 
 ### Team & Visitors
 
 | Tool | Description |
 |------|-------------|
-| `get_operators` | Get list of support team operators |
-| `get_visitors` | Get list of current website visitors |
+| `get_operators` | Typed list of operators (user_id, email, role, availability). |
+| `find_operator_by_email` | Resolve an operator's user_id from their email (useful before `assign_conversation`). |
+| `get_visitors` | Active website visitors with geolocation + page context. |
+
+## Reliability
+
+The HTTP client automatically retries with exponential backoff on `429` (rate limited) and `5xx` responses, honouring `Retry-After` headers when present. Up to 4 retries by default. Prevents silent drops of operator replies when Crisp is under load.
 
 ## Available Resources
 
 | URI | Description |
 |-----|-------------|
-| `crisp://conversations/unresolved` | List of all unresolved support conversations |
+| `crisp://conversations/awaiting-reply` | Unresolved conversations where the customer is currently waiting on an operator reply (longest-wait first). |
+| `crisp://conversations/unresolved` | List of all unresolved support conversations. |
 
 ## Examples
 

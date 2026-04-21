@@ -4,7 +4,19 @@
  * Crisp MCP Server
  *
  * An MCP server that provides tools for interacting with the Crisp
- * customer support platform.
+ * customer support platform. See README.md for tool-by-tool docs.
+ *
+ * This revision (v1.1.0) adds five major capability areas on top of the
+ * original tool set:
+ *   - People / Contacts lookup (find by email, past conversations, profile)
+ *   - A "rich context" super-tool that assembles everything Ana needs
+ *     about a ticket in one call
+ *   - File attachment send (by URL) and better inbound file rendering
+ *   - Exponential-backoff retry for 429 + 5xx on every request
+ *   - Smart conversation filters (awaiting-reply, assigned-to-me, by segment)
+ *
+ * See crisp-client.ts for the underlying HTTP client; this file only wires
+ * up the MCP tool schemas and dispatches calls.
  */
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -16,7 +28,13 @@ import {
   ReadResourceRequestSchema,
   Tool,
 } from "@modelcontextprotocol/sdk/types.js";
-import { CrispClient, Conversation, Message } from "./crisp-client.js";
+import {
+  CrispClient,
+  Conversation,
+  Message,
+  PeopleProfile,
+  OperatorDetails,
+} from "./crisp-client.js";
 
 // Get configuration from environment variables
 const CRISP_IDENTIFIER = process.env.CRISP_IDENTIFIER;
@@ -25,7 +43,7 @@ const CRISP_WEBSITE_ID = process.env.CRISP_WEBSITE_ID;
 
 if (!CRISP_IDENTIFIER || !CRISP_KEY || !CRISP_WEBSITE_ID) {
   console.error(
-    "Error: CRISP_IDENTIFIER, CRISP_KEY, and CRISP_WEBSITE_ID environment variables are required"
+    "Error: CRISP_IDENTIFIER, CRISP_KEY, and CRISP_WEBSITE_ID environment variables are required",
   );
   process.exit(1);
 }
@@ -36,79 +54,108 @@ const crispClient = new CrispClient({
   websiteId: CRISP_WEBSITE_ID,
 });
 
-// Define available tools
+// ============================================
+// Tool schemas
+// ============================================
+
 const tools: Tool[] = [
+  // ── Conversation discovery ──────────────────
   {
     name: "list_conversations",
     description:
-      "List conversations from Crisp with optional filtering. Returns a list of conversation summaries.",
+      "List conversations with optional filters. Returns `{ data, pageNumber, hasMore, nextPage }` so callers know whether to fetch more. Filters are OR-combined with the standard search.",
     inputSchema: {
       type: "object",
       properties: {
-        page: {
-          type: "number",
-          description: "Page number for pagination (default: 1)",
-        },
-        search: {
-          type: "string",
-          description: "Search query to filter conversations",
-        },
-        unresolved_only: {
-          type: "boolean",
-          description: "Only return unresolved conversations (default: false)",
-        },
-        unread_only: {
-          type: "boolean",
-          description: "Only return unread conversations (default: false)",
-        },
+        page: { type: "number", description: "Page number (default: 1)" },
+        per_page: { type: "number", description: "Items per page (default: 20)" },
+        search: { type: "string", description: "Plain-text search across conversations" },
+        segment: { type: "string", description: "Filter to conversations tagged with this segment" },
+        unresolved_only: { type: "boolean", description: "Only return unresolved conversations" },
+        unread_only: { type: "boolean", description: "Only conversations unread by the operator" },
+        assigned_to: { type: "string", description: "Operator user_id the conversation is assigned to" },
+        unassigned_only: { type: "boolean", description: "Only return unassigned conversations" },
+        mention_only: { type: "boolean", description: "Only conversations where you are @-mentioned in internal notes" },
+        order_by_waiting: { type: "boolean", description: "Sort by how long the customer has been waiting (best for triage)" },
       },
     },
   },
   {
     name: "get_unresolved_conversations",
     description:
-      "Get all unresolved conversations. Useful for seeing open support tickets that need attention.",
+      "Shortcut for all unresolved conversations across multiple pages. Returns a flat array (no pagination metadata). Use `conversations_awaiting_reply` if you specifically want ones where a customer is waiting on YOU.",
     inputSchema: {
       type: "object",
       properties: {
-        max_pages: {
-          type: "number",
-          description: "Maximum pages to fetch (default: 5)",
-        },
+        max_pages: { type: "number", description: "Max pages to walk (default: 5)" },
       },
     },
   },
   {
-    name: "get_conversation",
+    name: "conversations_awaiting_reply",
     description:
-      "Get detailed information about a specific conversation by its session ID.",
+      "List unresolved conversations where the customer is currently waiting on an operator reply (unread_by_operator > 0). Ordered so the longest-waiting appear first. This is the single most useful 'what should I work on' tool.",
     inputSchema: {
       type: "object",
       properties: {
-        session_id: {
-          type: "string",
-          description: "The conversation session ID",
-        },
+        max_pages: { type: "number", description: "Max pages to walk (default: 3)" },
       },
+    },
+  },
+  {
+    name: "conversations_assigned_to_me",
+    description: "List conversations assigned to a specific operator (pass their user_id).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        user_id: { type: "string", description: "Operator user_id" },
+        unresolved_only: { type: "boolean", description: "Default true" },
+        max_pages: { type: "number", description: "Max pages (default: 3)" },
+      },
+      required: ["user_id"],
+    },
+  },
+  {
+    name: "conversations_by_segment",
+    description: "List conversations tagged with a specific segment (e.g. `refund`, `bug`, `billing`).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        segment: { type: "string", description: "Segment name (tag)" },
+        unresolved_only: { type: "boolean" },
+        max_pages: { type: "number", description: "Default: 3" },
+      },
+      required: ["segment"],
+    },
+  },
+  {
+    name: "search_conversations",
+    description: "Plain-text search across conversations.",
+    inputSchema: {
+      type: "object",
+      properties: { query: { type: "string" } },
+      required: ["query"],
+    },
+  },
+
+  // ── Conversation detail ─────────────────────
+  {
+    name: "get_conversation",
+    description: "Get detailed information about a specific conversation.",
+    inputSchema: {
+      type: "object",
+      properties: { session_id: { type: "string" } },
       required: ["session_id"],
     },
   },
   {
     name: "get_messages",
-    description:
-      "Get messages from a conversation. Returns the message history.",
+    description: "Get message history for a conversation. File/animation/audio messages have their URLs surfaced in the output.",
     inputSchema: {
       type: "object",
       properties: {
-        session_id: {
-          type: "string",
-          description: "The conversation session ID",
-        },
-        max_age_hours: {
-          type: "number",
-          description:
-            "Only get messages from the last N hours (optional, default: all messages)",
-        },
+        session_id: { type: "string" },
+        max_age_hours: { type: "number", description: "Only return messages newer than this" },
       },
       required: ["session_id"],
     },
@@ -116,186 +163,144 @@ const tools: Tool[] = [
   {
     name: "get_conversation_with_messages",
     description:
-      "Get a conversation and all its messages formatted for analysis. This is the most useful tool for understanding a support ticket.",
+      "Get a conversation with messages formatted for analysis. Good for small-context summaries. For full customer history + cross-conversation context use `get_rich_context` instead.",
     inputSchema: {
       type: "object",
       properties: {
-        session_id: {
-          type: "string",
-          description: "The conversation session ID",
-        },
-        max_age_hours: {
-          type: "number",
-          description:
-            "Only get messages from the last N hours (optional, default: 48)",
-        },
+        session_id: { type: "string" },
+        max_age_hours: { type: "number", description: "Default: 48" },
       },
       required: ["session_id"],
     },
   },
   {
-    name: "send_message",
+    name: "get_rich_context",
     description:
-      "Send a message to a conversation. Can send as text or internal note.",
+      "HEAVY CONTEXT: returns conversation + messages + linked Crisp People profile + that person's past conversations + custom data, all in one call. Replaces 4-5 round trips. Use this at the start of any non-trivial ticket reply.",
     inputSchema: {
       type: "object",
       properties: {
-        session_id: {
-          type: "string",
-          description: "The conversation session ID",
-        },
-        content: {
-          type: "string",
-          description: "The message content to send",
-        },
+        session_id: { type: "string" },
+        max_age_hours: { type: "number", description: "Default: 72" },
+        max_other_conversations: { type: "number", description: "Default: 10" },
+      },
+      required: ["session_id"],
+    },
+  },
+
+  // ── Messaging ───────────────────────────────
+  {
+    name: "send_message",
+    description: "Send a text message or internal note to a conversation.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        session_id: { type: "string" },
+        content: { type: "string" },
         type: {
           type: "string",
           enum: ["text", "note"],
-          description:
-            "Message type: 'text' for customer-visible message, 'note' for internal note (default: text)",
+          description: "'text' for customer-visible, 'note' for internal. Default: text",
         },
-        nickname: {
-          type: "string",
-          description:
-            "The nickname to display for the sender (default: 'Support')",
+        nickname: { type: "string", description: "Sender display name (default: 'Support')" },
+        mentions: {
+          type: "array",
+          items: { type: "string" },
+          description: "Operator user_ids to @-mention in an internal note",
         },
       },
       required: ["session_id", "content"],
     },
   },
   {
-    name: "set_conversation_state",
+    name: "send_file_message",
     description:
-      "Change the state of a conversation (pending, unresolved, resolved).",
+      "Attach a file to a conversation by URL (no upload). Good when the file is already hosted (S3/R2/imgur/etc.). If you need to push raw bytes through Crisp's bucket, use the Crisp web UI or call the client's `uploadAndSendFile` method directly.",
     inputSchema: {
       type: "object",
       properties: {
-        session_id: {
-          type: "string",
-          description: "The conversation session ID",
-        },
-        state: {
-          type: "string",
-          enum: ["pending", "unresolved", "resolved"],
-          description: "The new state for the conversation",
-        },
+        session_id: { type: "string" },
+        url: { type: "string", description: "Publicly accessible URL to the file" },
+        name: { type: "string", description: "Filename to display to the customer (default: derived from URL)" },
+        mime_type: { type: "string", description: "e.g. image/png, application/pdf (default: application/octet-stream)" },
+        nickname: { type: "string", description: "Sender display name (default: 'Support')" },
+      },
+      required: ["session_id", "url"],
+    },
+  },
+
+  // ── Conversation state ──────────────────────
+  {
+    name: "set_conversation_state",
+    description: "Change conversation state (pending / unresolved / resolved).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        session_id: { type: "string" },
+        state: { type: "string", enum: ["pending", "unresolved", "resolved"] },
       },
       required: ["session_id", "state"],
     },
   },
   {
     name: "update_conversation_meta",
-    description:
-      "Update metadata for a conversation (email, nickname, subject, segments, etc.).",
+    description: "Update conversation metadata (email, nickname, subject, segments).",
     inputSchema: {
       type: "object",
       properties: {
-        session_id: {
-          type: "string",
-          description: "The conversation session ID",
-        },
-        email: {
-          type: "string",
-          description: "Customer email address",
-        },
-        nickname: {
-          type: "string",
-          description: "Customer display name",
-        },
-        subject: {
-          type: "string",
-          description: "Conversation subject",
-        },
-        segments: {
-          type: "array",
-          items: { type: "string" },
-          description: "Tags/segments for the conversation",
-        },
+        session_id: { type: "string" },
+        email: { type: "string" },
+        nickname: { type: "string" },
+        subject: { type: "string" },
+        segments: { type: "array", items: { type: "string" } },
       },
       required: ["session_id"],
     },
   },
   {
     name: "add_segments",
-    description: "Add tags/segments to a conversation.",
+    description: "Add segments (tags) to a conversation. Idempotent — existing segments are preserved.",
     inputSchema: {
       type: "object",
       properties: {
-        session_id: {
-          type: "string",
-          description: "The conversation session ID",
-        },
-        segments: {
-          type: "array",
-          items: { type: "string" },
-          description: "Segments to add",
-        },
+        session_id: { type: "string" },
+        segments: { type: "array", items: { type: "string" } },
       },
       required: ["session_id", "segments"],
     },
   },
   {
     name: "remove_segments",
-    description: "Remove tags/segments from a conversation.",
+    description: "Remove specific segments from a conversation.",
     inputSchema: {
       type: "object",
       properties: {
-        session_id: {
-          type: "string",
-          description: "The conversation session ID",
-        },
-        segments: {
-          type: "array",
-          items: { type: "string" },
-          description: "Segments to remove",
-        },
+        session_id: { type: "string" },
+        segments: { type: "array", items: { type: "string" } },
       },
       required: ["session_id", "segments"],
     },
   },
-  {
-    name: "search_conversations",
-    description: "Search conversations by text query.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        query: {
-          type: "string",
-          description: "Search query",
-        },
-      },
-      required: ["query"],
-    },
-  },
+
+  // ── Conversation actions ────────────────────
   {
     name: "assign_conversation",
-    description: "Assign a conversation to a specific operator.",
+    description: "Assign a conversation to an operator by user_id. Tip: use `find_operator_by_email` if you know their email but not their user_id.",
     inputSchema: {
       type: "object",
       properties: {
-        session_id: {
-          type: "string",
-          description: "The conversation session ID",
-        },
-        user_id: {
-          type: "string",
-          description: "The operator user ID to assign to",
-        },
+        session_id: { type: "string" },
+        user_id: { type: "string" },
       },
       required: ["session_id", "user_id"],
     },
   },
   {
     name: "block_conversation",
-    description: "Block a conversation (spam, abuse, etc.).",
+    description: "Block a conversation (spam/abuse).",
     inputSchema: {
       type: "object",
-      properties: {
-        session_id: {
-          type: "string",
-          description: "The conversation session ID",
-        },
-      },
+      properties: { session_id: { type: "string" } },
       required: ["session_id"],
     },
   },
@@ -304,49 +309,95 @@ const tools: Tool[] = [
     description: "Unblock a previously blocked conversation.",
     inputSchema: {
       type: "object",
-      properties: {
-        session_id: {
-          type: "string",
-          description: "The conversation session ID",
-        },
-      },
+      properties: { session_id: { type: "string" } },
       required: ["session_id"],
     },
   },
   {
     name: "delete_conversation",
-    description:
-      "Permanently delete a conversation. Use with caution, this cannot be undone.",
+    description: "Permanently delete a conversation. Cannot be undone.",
     inputSchema: {
       type: "object",
-      properties: {
-        session_id: {
-          type: "string",
-          description: "The conversation session ID",
-        },
-      },
+      properties: { session_id: { type: "string" } },
       required: ["session_id"],
     },
   },
+
+  // ── People (Contacts) ───────────────────────
   {
-    name: "get_operators",
-    description: "Get list of operators (support team members) for the website.",
+    name: "find_person_by_email",
+    description:
+      "Find a Crisp People profile by email. Returns the profile with its stable `people_id` which other person_* tools need. Returns null if no match.",
     inputSchema: {
       type: "object",
-      properties: {},
+      properties: { email: { type: "string" } },
+      required: ["email"],
+    },
+  },
+  {
+    name: "get_person",
+    description: "Get a full People profile by `people_id` (UUID, returned from `find_person_by_email`).",
+    inputSchema: {
+      type: "object",
+      properties: { people_id: { type: "string" } },
+      required: ["people_id"],
+    },
+  },
+  {
+    name: "get_person_conversations",
+    description: "List all conversations this person has had with your team.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        people_id: { type: "string" },
+        page: { type: "number", description: "Default: 1" },
+      },
+      required: ["people_id"],
+    },
+  },
+  {
+    name: "get_person_data",
+    description: "Get the custom data dictionary attached to a People profile (plan, subscription status, whatever your website has pushed in).",
+    inputSchema: {
+      type: "object",
+      properties: { people_id: { type: "string" } },
+      required: ["people_id"],
+    },
+  },
+
+  // ── Team & Visitors ─────────────────────────
+  {
+    name: "get_operators",
+    description: "Get typed list of operators (team members) with user_id, email, role, availability.",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "find_operator_by_email",
+    description: "Resolve an operator's user_id from their email. Useful as a pre-step to `assign_conversation`.",
+    inputSchema: {
+      type: "object",
+      properties: { email: { type: "string" } },
+      required: ["email"],
     },
   },
   {
     name: "get_visitors",
-    description: "Get list of visitors currently browsing the website.",
+    description: "Get currently-active website visitors (typed, with geolocation + page info).",
     inputSchema: {
       type: "object",
-      properties: {},
+      properties: { page: { type: "number", description: "Default: 1" } },
     },
   },
 ];
 
-// Helper function to format conversation summary
+// ============================================
+// Formatting helpers
+// ============================================
+
+/**
+ * Compact conversation summary optimised for listings. Hides device/IP
+ * noise that blows up token counts when you're just scanning tickets.
+ */
 function formatConversationSummary(conv: Conversation): Record<string, unknown> {
   return {
     session_id: conv.session_id,
@@ -355,351 +406,386 @@ function formatConversationSummary(conv: Conversation): Record<string, unknown> 
       nickname: conv.meta?.nickname || "Unknown",
       email: conv.meta?.email || null,
     },
+    subject: conv.meta?.subject || null,
     last_message: conv.last_message,
     segments: conv.meta?.segments || [],
-    unread: conv.unread?.operator || 0,
+    assigned_to: conv.assigned?.user_id || null,
+    unread_operator: conv.unread?.operator || 0,
+    unread_visitor: conv.unread?.visitor || 0,
+    is_awaiting_operator_reply:
+      conv.state !== "resolved" && (conv.unread?.operator ?? 0) > 0,
     created_at: new Date(conv.created_at).toISOString(),
     updated_at: new Date(conv.updated_at).toISOString(),
   };
 }
 
-// Create MCP server
+/**
+ * Per-message summary that surfaces file URLs instead of dumping the raw
+ * content object. Keep fields small — this gets repeated many times.
+ */
+function formatMessageSummary(msg: Message): Record<string, unknown> {
+  return {
+    type: msg.type,
+    from: msg.from,
+    timestamp: new Date(msg.timestamp).toISOString(),
+    author: msg.user?.nickname || (msg.from === "user" ? "Customer" : "Operator"),
+    content: crispClient.renderMessageContent(msg),
+    fingerprint: msg.fingerprint,
+  };
+}
+
+function formatPerson(p: PeopleProfile): Record<string, unknown> {
+  return {
+    people_id: p.people_id,
+    email: p.email || null,
+    nickname: p.person?.nickname || null,
+    company: p.company?.name || null,
+    segments: p.segments || [],
+    notepad: p.notepad || null,
+    score: p.score ?? null,
+    active: p.active ?? null,
+    geolocation: p.person?.geolocation || null,
+    created_at: p.created_at ? new Date(p.created_at).toISOString() : null,
+    updated_at: p.updated_at ? new Date(p.updated_at).toISOString() : null,
+  };
+}
+
+function formatOperator(op: { type?: string; details?: OperatorDetails }): Record<string, unknown> {
+  const d = op.details || {};
+  return {
+    user_id: d.user_id || null,
+    email: d.email || null,
+    name: [d.first_name, d.last_name].filter(Boolean).join(" ") || null,
+    role: d.role || null,
+    title: d.title || null,
+    availability: d.availability || null,
+  };
+}
+
+/** Tight JSON text response, reusing the existing content-block shape. */
+function jsonResult(data: unknown): { content: [{ type: "text"; text: string }] } {
+  return {
+    content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+  };
+}
+
+// ============================================
+// Server wiring
+// ============================================
+
 const server = new Server(
   {
     name: "crisp-mcp",
-    version: "1.0.0",
+    version: "1.1.0",
   },
   {
     capabilities: {
       tools: {},
       resources: {},
     },
-  }
+  },
 );
 
-// Handle tool listing
-server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return { tools };
-});
+server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
 
-// Handle tool calls
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
+  const a = (args ?? {}) as Record<string, unknown>;
 
   try {
     switch (name) {
+      // ── Conversation discovery ───────────────
       case "list_conversations": {
-        const conversations = await crispClient.listConversations({
-          pageNumber: (args?.page as number) || 1,
-          searchQuery: args?.search as string,
-          filterUnresolved: (args?.unresolved_only as boolean) || false,
-          filterNotRead: (args?.unread_only as boolean) || false,
+        const res = await crispClient.listConversations({
+          pageNumber: (a.page as number) || 1,
+          perPage: (a.per_page as number) || 20,
+          searchText: a.search as string | undefined,
+          searchSegment: a.segment as string | undefined,
+          filterNotResolved: Boolean(a.unresolved_only),
+          filterUnread: Boolean(a.unread_only),
+          filterAssigned: a.assigned_to as string | undefined,
+          filterUnassigned: Boolean(a.unassigned_only),
+          filterMention: Boolean(a.mention_only),
+          orderDateWaiting: Boolean(a.order_by_waiting),
         });
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(
-                conversations.map(formatConversationSummary),
-                null,
-                2
-              ),
-            },
-          ],
-        };
+        return jsonResult({
+          conversations: res.data.map(formatConversationSummary),
+          page_number: res.pageNumber,
+          has_more: res.hasMore,
+          next_page: res.nextPage,
+        });
       }
 
       case "get_unresolved_conversations": {
-        const maxPages = (args?.max_pages as number) || 5;
-        const conversations = await crispClient.getUnresolvedConversations(maxPages);
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(
-                conversations.map(formatConversationSummary),
-                null,
-                2
-              ),
-            },
-          ],
-        };
+        const maxPages = (a.max_pages as number) || 5;
+        const all = await crispClient.listConversationsAllPages(
+          { filterNotResolved: true, orderDateWaiting: true },
+          maxPages,
+        );
+        return jsonResult(all.map(formatConversationSummary));
       }
 
+      case "conversations_awaiting_reply": {
+        // "Awaiting reply" = unresolved + operator has unread messages on
+        // their side. Using filter_unread narrows this server-side so we
+        // don't over-fetch.
+        const maxPages = (a.max_pages as number) || 3;
+        const all = await crispClient.listConversationsAllPages(
+          {
+            filterNotResolved: true,
+            filterUnread: true,
+            orderDateWaiting: true,
+          },
+          maxPages,
+        );
+        return jsonResult(all.map(formatConversationSummary));
+      }
+
+      case "conversations_assigned_to_me": {
+        const userId = a.user_id as string;
+        if (!userId) throw new Error("user_id is required");
+        const maxPages = (a.max_pages as number) || 3;
+        const all = await crispClient.listConversationsAllPages(
+          {
+            filterAssigned: userId,
+            filterNotResolved: a.unresolved_only !== false,
+            orderDateWaiting: true,
+          },
+          maxPages,
+        );
+        return jsonResult(all.map(formatConversationSummary));
+      }
+
+      case "conversations_by_segment": {
+        const segment = a.segment as string;
+        if (!segment) throw new Error("segment is required");
+        const maxPages = (a.max_pages as number) || 3;
+        const all = await crispClient.listConversationsAllPages(
+          {
+            searchSegment: segment,
+            filterNotResolved: Boolean(a.unresolved_only),
+            orderDateWaiting: true,
+          },
+          maxPages,
+        );
+        return jsonResult(all.map(formatConversationSummary));
+      }
+
+      case "search_conversations": {
+        const query = a.query as string;
+        if (!query) throw new Error("query is required");
+        const res = await crispClient.listConversations({ searchText: query });
+        return jsonResult(res.data.map(formatConversationSummary));
+      }
+
+      // ── Conversation detail ──────────────────
       case "get_conversation": {
-        const sessionId = args?.session_id as string;
-        if (!sessionId) {
-          throw new Error("session_id is required");
-        }
-        const conversation = await crispClient.getConversation(sessionId);
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(conversation, null, 2),
-            },
-          ],
-        };
+        const sessionId = a.session_id as string;
+        if (!sessionId) throw new Error("session_id is required");
+        return jsonResult(await crispClient.getConversation(sessionId));
       }
 
       case "get_messages": {
-        const sessionId = args?.session_id as string;
-        if (!sessionId) {
-          throw new Error("session_id is required");
-        }
-        const maxAgeHours = args?.max_age_hours as number | undefined;
+        const sessionId = a.session_id as string;
+        if (!sessionId) throw new Error("session_id is required");
         const messages = await crispClient.getAllMessages(
           sessionId,
           10,
-          maxAgeHours
+          a.max_age_hours as number | undefined,
         );
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(messages, null, 2),
-            },
-          ],
-        };
+        return jsonResult(messages.map(formatMessageSummary));
       }
 
       case "get_conversation_with_messages": {
-        const sessionId = args?.session_id as string;
-        if (!sessionId) {
-          throw new Error("session_id is required");
-        }
-        const maxAgeHours = (args?.max_age_hours as number) || 48;
+        const sessionId = a.session_id as string;
+        if (!sessionId) throw new Error("session_id is required");
+        const maxAgeHours = (a.max_age_hours as number) || 48;
         const conversation = await crispClient.getConversation(sessionId);
-        const messages = await crispClient.getAllMessages(
-          sessionId,
-          10,
-          maxAgeHours
-        );
-        const formatted = crispClient.formatConversationForAnalysis(
-          conversation,
-          messages
-        );
+        const messages = await crispClient.getAllMessages(sessionId, 10, maxAgeHours);
+        const formatted = crispClient.formatConversationForAnalysis(conversation, messages);
         return {
-          content: [
-            {
-              type: "text",
-              text: formatted,
-            },
-          ],
+          content: [{ type: "text", text: formatted }],
         };
       }
 
+      case "get_rich_context": {
+        const sessionId = a.session_id as string;
+        if (!sessionId) throw new Error("session_id is required");
+        const ctx = await crispClient.getRichContext(sessionId, {
+          maxAgeHours: (a.max_age_hours as number) || 72,
+          maxOtherConversations: (a.max_other_conversations as number) || 10,
+        });
+        return jsonResult({
+          conversation: formatConversationSummary(ctx.conversation),
+          messages: ctx.messages.map(formatMessageSummary),
+          person: ctx.person ? formatPerson(ctx.person) : null,
+          person_custom_data: ctx.personData,
+          past_conversations: ctx.otherConversations.map(formatConversationSummary),
+        });
+      }
+
+      // ── Messaging ────────────────────────────
       case "send_message": {
-        const sessionId = args?.session_id as string;
-        const content = args?.content as string;
+        const sessionId = a.session_id as string;
+        const content = a.content as string;
         if (!sessionId || !content) {
           throw new Error("session_id and content are required");
         }
-        const messageType = (args?.type as "text" | "note") || "text";
-        const nickname = (args?.nickname as string) || "Support";
-
+        const messageType = (a.type as "text" | "note") || "text";
+        const nickname = (a.nickname as string) || "Support";
+        const mentions = a.mentions as string[] | undefined;
         const result = await crispClient.sendMessage(sessionId, content, {
           type: messageType,
           user: { nickname },
+          mentions,
         });
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(
-                { success: true, fingerprint: result.fingerprint },
-                null,
-                2
-              ),
-            },
-          ],
-        };
+        return jsonResult({ success: true, fingerprint: result.fingerprint });
       }
 
+      case "send_file_message": {
+        const sessionId = a.session_id as string;
+        const url = a.url as string;
+        if (!sessionId || !url) {
+          throw new Error("session_id and url are required");
+        }
+        const nickname = (a.nickname as string) || "Support";
+        const result = await crispClient.sendFileMessage(
+          sessionId,
+          {
+            url,
+            name: a.name as string | undefined,
+            mimeType: a.mime_type as string | undefined,
+          },
+          { user: { nickname } },
+        );
+        return jsonResult({ success: true, fingerprint: result.fingerprint });
+      }
+
+      // ── Conversation state ───────────────────
       case "set_conversation_state": {
-        const sessionId = args?.session_id as string;
-        const state = args?.state as "pending" | "unresolved" | "resolved";
+        const sessionId = a.session_id as string;
+        const state = a.state as "pending" | "unresolved" | "resolved";
         if (!sessionId || !state) {
           throw new Error("session_id and state are required");
         }
         await crispClient.setConversationState(sessionId, state);
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({ success: true, state }, null, 2),
-            },
-          ],
-        };
+        return jsonResult({ success: true, state });
       }
 
       case "update_conversation_meta": {
-        const sessionId = args?.session_id as string;
-        if (!sessionId) {
-          throw new Error("session_id is required");
-        }
+        const sessionId = a.session_id as string;
+        if (!sessionId) throw new Error("session_id is required");
         const meta: Record<string, unknown> = {};
-        if (args?.email) meta.email = args.email;
-        if (args?.nickname) meta.nickname = args.nickname;
-        if (args?.subject) meta.subject = args.subject;
-        if (args?.segments) meta.segments = args.segments;
-
+        if (a.email) meta.email = a.email;
+        if (a.nickname) meta.nickname = a.nickname;
+        if (a.subject) meta.subject = a.subject;
+        if (a.segments) meta.segments = a.segments;
         await crispClient.updateConversationMeta(sessionId, meta);
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({ success: true, updated: meta }, null, 2),
-            },
-          ],
-        };
+        return jsonResult({ success: true, updated: meta });
       }
 
       case "add_segments": {
-        const sessionId = args?.session_id as string;
-        const segments = args?.segments as string[];
+        const sessionId = a.session_id as string;
+        const segments = a.segments as string[];
         if (!sessionId || !segments) {
           throw new Error("session_id and segments are required");
         }
         await crispClient.addSegments(sessionId, segments);
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({ success: true, added: segments }, null, 2),
-            },
-          ],
-        };
+        return jsonResult({ success: true, added: segments });
       }
 
       case "remove_segments": {
-        const sessionId = args?.session_id as string;
-        const segments = args?.segments as string[];
+        const sessionId = a.session_id as string;
+        const segments = a.segments as string[];
         if (!sessionId || !segments) {
           throw new Error("session_id and segments are required");
         }
         await crispClient.removeSegments(sessionId, segments);
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({ success: true, removed: segments }, null, 2),
-            },
-          ],
-        };
+        return jsonResult({ success: true, removed: segments });
       }
 
-      case "search_conversations": {
-        const query = args?.query as string;
-        if (!query) {
-          throw new Error("query is required");
-        }
-        const conversations = await crispClient.searchConversations(query);
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(
-                conversations.map(formatConversationSummary),
-                null,
-                2
-              ),
-            },
-          ],
-        };
-      }
-
+      // ── Conversation actions ─────────────────
       case "assign_conversation": {
-        const sessionId = args?.session_id as string;
-        const userId = args?.user_id as string;
+        const sessionId = a.session_id as string;
+        const userId = a.user_id as string;
         if (!sessionId || !userId) {
           throw new Error("session_id and user_id are required");
         }
         await crispClient.assignConversation(sessionId, userId);
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(
-                { success: true, assigned_to: userId },
-                null,
-                2
-              ),
-            },
-          ],
-        };
+        return jsonResult({ success: true, assigned_to: userId });
       }
 
       case "block_conversation": {
-        const sessionId = args?.session_id as string;
-        if (!sessionId) {
-          throw new Error("session_id is required");
-        }
+        const sessionId = a.session_id as string;
+        if (!sessionId) throw new Error("session_id is required");
         await crispClient.blockConversation(sessionId);
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({ success: true, blocked: true }, null, 2),
-            },
-          ],
-        };
+        return jsonResult({ success: true, blocked: true });
       }
 
       case "unblock_conversation": {
-        const sessionId = args?.session_id as string;
-        if (!sessionId) {
-          throw new Error("session_id is required");
-        }
+        const sessionId = a.session_id as string;
+        if (!sessionId) throw new Error("session_id is required");
         await crispClient.unblockConversation(sessionId);
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({ success: true, blocked: false }, null, 2),
-            },
-          ],
-        };
+        return jsonResult({ success: true, blocked: false });
       }
 
       case "delete_conversation": {
-        const sessionId = args?.session_id as string;
-        if (!sessionId) {
-          throw new Error("session_id is required");
-        }
+        const sessionId = a.session_id as string;
+        if (!sessionId) throw new Error("session_id is required");
         await crispClient.deleteConversation(sessionId);
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({ success: true, deleted: true }, null, 2),
-            },
-          ],
-        };
+        return jsonResult({ success: true, deleted: true });
       }
 
+      // ── People (Contacts) ────────────────────
+      case "find_person_by_email": {
+        const email = a.email as string;
+        if (!email) throw new Error("email is required");
+        const person = await crispClient.findPersonByEmail(email);
+        return jsonResult(person ? formatPerson(person) : null);
+      }
+
+      case "get_person": {
+        const peopleId = a.people_id as string;
+        if (!peopleId) throw new Error("people_id is required");
+        const person = await crispClient.getPerson(peopleId);
+        return jsonResult(formatPerson(person));
+      }
+
+      case "get_person_conversations": {
+        const peopleId = a.people_id as string;
+        if (!peopleId) throw new Error("people_id is required");
+        const page = (a.page as number) || 1;
+        const res = await crispClient.getPersonConversations(peopleId, page);
+        return jsonResult({
+          conversations: res.data.map(formatConversationSummary),
+          page_number: res.pageNumber,
+          has_more: res.hasMore,
+          next_page: res.nextPage,
+        });
+      }
+
+      case "get_person_data": {
+        const peopleId = a.people_id as string;
+        if (!peopleId) throw new Error("people_id is required");
+        return jsonResult(await crispClient.getPersonData(peopleId));
+      }
+
+      // ── Team & Visitors ──────────────────────
       case "get_operators": {
         const operators = await crispClient.getOperators();
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(operators, null, 2),
-            },
-          ],
-        };
+        return jsonResult(operators.map(formatOperator));
+      }
+
+      case "find_operator_by_email": {
+        const email = a.email as string;
+        if (!email) throw new Error("email is required");
+        const op = await crispClient.findOperatorByEmail(email);
+        return jsonResult(op ? formatOperator({ details: op }) : null);
       }
 
       case "get_visitors": {
-        const visitors = await crispClient.getVisitors();
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(visitors, null, 2),
-            },
-          ],
-        };
+        const page = (a.page as number) || 1;
+        return jsonResult(await crispClient.getVisitors(page));
       }
 
       default:
@@ -720,36 +806,56 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
-// Handle resource listing (we expose unresolved conversations as a resource)
-server.setRequestHandler(ListResourcesRequestSchema, async () => {
-  return {
-    resources: [
-      {
-        uri: "crisp://conversations/unresolved",
-        name: "Unresolved Conversations",
-        description: "List of all unresolved support conversations",
-        mimeType: "application/json",
-      },
-    ],
-  };
-});
+// Resource: expose "conversations awaiting reply" since that's the highest-
+// value snapshot for an autonomous agent polling the server.
+server.setRequestHandler(ListResourcesRequestSchema, async () => ({
+  resources: [
+    {
+      uri: "crisp://conversations/awaiting-reply",
+      name: "Conversations awaiting operator reply",
+      description:
+        "Unresolved conversations where a customer is currently waiting on an operator, ordered longest-wait first.",
+      mimeType: "application/json",
+    },
+    {
+      uri: "crisp://conversations/unresolved",
+      name: "Unresolved Conversations",
+      description: "All unresolved support conversations.",
+      mimeType: "application/json",
+    },
+  ],
+}));
 
-// Handle resource reading
 server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
   const { uri } = request.params;
 
-  if (uri === "crisp://conversations/unresolved") {
-    const conversations = await crispClient.getUnresolvedConversations(5);
+  if (uri === "crisp://conversations/awaiting-reply") {
+    const all = await crispClient.listConversationsAllPages(
+      { filterNotResolved: true, filterUnread: true, orderDateWaiting: true },
+      3,
+    );
     return {
       contents: [
         {
           uri,
           mimeType: "application/json",
-          text: JSON.stringify(
-            conversations.map(formatConversationSummary),
-            null,
-            2
-          ),
+          text: JSON.stringify(all.map(formatConversationSummary), null, 2),
+        },
+      ],
+    };
+  }
+
+  if (uri === "crisp://conversations/unresolved") {
+    const all = await crispClient.listConversationsAllPages(
+      { filterNotResolved: true, orderDateWaiting: true },
+      5,
+    );
+    return {
+      contents: [
+        {
+          uri,
+          mimeType: "application/json",
+          text: JSON.stringify(all.map(formatConversationSummary), null, 2),
         },
       ],
     };
@@ -758,7 +864,6 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
   throw new Error(`Unknown resource: ${uri}`);
 });
 
-// Start the server
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
