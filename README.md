@@ -7,6 +7,7 @@ An MCP (Model Context Protocol) server that provides tools for interacting with 
 ```bash
 git clone https://github.com/getlate-dev/crisp-mcp.git
 cd crisp-mcp
+mise install
 npm install
 npm run build
 ```
