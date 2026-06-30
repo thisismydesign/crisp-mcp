@@ -7,11 +7,15 @@
   "bin": {
     "crisp-mcp": "./dist/index.js"
   },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
     "start": "node dist/index.js",
-    "prepare": "npm run build"
+    "prepare": "npm run build",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0"
@@ -29,5 +33,17 @@
     "support",
     "chat"
   ],
-  "license": "MIT"
+  "author": "thisismydesign",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thisismydesign/crisp-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/thisismydesign/crisp-mcp/issues"
+  },
+  "homepage": "https://github.com/thisismydesign/crisp-mcp#readme",
+  "publishConfig": {
+    "access": "public"
+  }
 }
