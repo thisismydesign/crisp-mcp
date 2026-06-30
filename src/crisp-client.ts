@@ -20,6 +20,16 @@
  *     that could clobber a concurrent edit — except for removal).
  */
 
+import { createRequire } from "node:module";
+
+// Read the package version at runtime so the User-Agent stays in sync with
+// releases. createRequire avoids rootDir/JSON-import issues under ESM + tsc;
+// "../package.json" resolves the same from both src/ and dist/.
+const { version: VERSION } = createRequire(import.meta.url)(
+  "../package.json",
+) as { version: string };
+const USER_AGENT = `crisp-mcp/${VERSION}`;
+
 // ============================================
 // Config
 // ============================================
@@ -365,9 +375,13 @@ export class CrispClient {
       const response = await fetch(url, {
         method,
         headers: {
+          // Crisp rejects requests without a User-Agent on some endpoints
+          // (conversations, operators, people) with a misleading
+          // 401 invalid_session, so this header is required, not cosmetic.
+          "User-Agent": USER_AGENT,
           Authorization: this.getAuthHeader(),
           "Content-Type": "application/json",
-          "X-Crisp-Tier": "plugin",
+          "X-Crisp-Tier": "website",
         },
         body: body !== undefined ? JSON.stringify(body) : undefined,
       });

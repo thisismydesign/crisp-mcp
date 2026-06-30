@@ -14,65 +14,11 @@ npm run build
 
 ## Getting Your Crisp API Credentials
 
-You'll need to create a Crisp Marketplace plugin to get API credentials. Here's how:
+This server uses a Crisp **website token**.
 
-### Step 1: Access the Marketplace
-
-1. Go to [Crisp Marketplace](https://marketplace.crisp.chat/)
-2. Click **"Create a Plugin"** (you need a Crisp account)
-
-### Step 2: Create Your Plugin
-
-1. Fill in the basic plugin info:
-   - **Name**: Something like "My MCP Integration" (only visible to you)
-   - **Description**: "Personal MCP server integration"
-   - **Category**: Select "Automation"
-   - **Privacy**: Keep it private (unless you want to publish)
-
-2. Click **"Create Plugin"**
-
-### Step 3: Get Your Credentials
-
-After creating the plugin:
-
-1. Go to your plugin's settings page
-2. Navigate to the **"Tokens"** section
-3. You'll find:
-   - **Plugin ID** (this is your `CRISP_IDENTIFIER`)
-   - **Plugin Secret Key** (this is your `CRISP_KEY`)
-
-### Step 4: Get Your Website ID
-
-1. Go to your [Crisp Dashboard](https://app.crisp.chat/)
-2. Click on **Settings** (gear icon)
-3. Go to **Website Settings**
-4. Your **Website ID** is in the URL: `app.crisp.chat/website/XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX/`
-5. Or find it under **Setup Instructions** > **Website ID**
-
-### Step 5: Configure Plugin Permissions
-
-Back in the Marketplace plugin settings, you need to enable the required scopes:
-
-1. Go to your plugin's **"Permissions"** tab
-2. Enable these scopes:
-   - `website:conversation:sessions` - Read conversations
-   - `website:conversation:messages` - Read/write messages
-   - `website:conversation:states` - Change conversation states
-   - `website:conversation:routing` - Assign conversations
-   - `website:conversation:metas` - Read/write metadata
-   - `website:operators:list` - List team members
-   - `website:visitors:list` - List visitors
-
-3. Click **"Save"**
-
-### Step 6: Install Plugin on Your Website
-
-1. Go to the **"Installations"** tab in your plugin settings
-2. Click **"Add Installation"**
-3. Select your website
-4. Confirm the installation
-
-You're now ready to use the MCP server!
+1. In the [Crisp app](https://app.crisp.chat/), go to **Settings → Workspace Settings → Advanced configuration** (owner-only).
+2. In the **API Token** section, click **Generate Token**. This gives you a **Token identifier** (`CRISP_TOKEN_ID`) and a **Token key** (`CRISP_TOKEN_KEY`).
+3. Find your **Website ID** in the dashboard URL: `app.crisp.chat/website/XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX/` (`CRISP_WEBSITE_ID`).
 
 ## Configuration
 
@@ -80,8 +26,8 @@ Set these environment variables:
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `CRISP_IDENTIFIER` | Your plugin ID from Marketplace | `ab1c2d3e-4f5g-6h7i-8j9k-0l1m2n3o4p5q` |
-| `CRISP_KEY` | Your plugin secret key | `a1b2c3d4e5f6...` (long string) |
+| `CRISP_TOKEN_ID` | Token identifier from Advanced configuration | `ab1c2d3e-4f5g-6h7i-8j9k-0l1m2n3o4p5q` |
+| `CRISP_TOKEN_KEY` | Token key from Advanced configuration | `a1b2c3d4e5f6...` (long string) |
 | `CRISP_WEBSITE_ID` | Your website ID | `12345678-1234-1234-1234-123456789012` |
 
 ## Usage with Claude Code
@@ -95,8 +41,8 @@ Add this to your Claude Code MCP settings (`~/.claude/settings.json`):
       "command": "node",
       "args": ["/path/to/crisp-mcp/dist/index.js"],
       "env": {
-        "CRISP_IDENTIFIER": "your-plugin-id",
-        "CRISP_KEY": "your-plugin-secret-key",
+        "CRISP_TOKEN_ID": "your-token-id",
+        "CRISP_TOKEN_KEY": "your-token-key",
         "CRISP_WEBSITE_ID": "your-website-id"
       }
     }
@@ -242,12 +188,8 @@ npm start
 ## Troubleshooting
 
 ### "Crisp API error: 401 Unauthorized"
-- Check that your `CRISP_IDENTIFIER` and `CRISP_KEY` are correct
-- Make sure you've installed the plugin on your website
-
-### "Crisp API error: 403 Forbidden"
-- Your plugin may be missing required permissions
-- Go to Marketplace > Your Plugin > Permissions and enable the necessary scopes
+- Check that your `CRISP_TOKEN_ID` and `CRISP_TOKEN_KEY` are correct
+- Make sure the token belongs to the same workspace as `CRISP_WEBSITE_ID`
 
 ### "Website not found"
 - Double-check your `CRISP_WEBSITE_ID`

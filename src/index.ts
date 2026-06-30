@@ -36,21 +36,22 @@ import {
   OperatorDetails,
 } from "./crisp-client.js";
 
-// Get configuration from environment variables
-const CRISP_IDENTIFIER = process.env.CRISP_IDENTIFIER;
-const CRISP_KEY = process.env.CRISP_KEY;
+// Get configuration from environment variables. CRISP_TOKEN_ID/CRISP_TOKEN_KEY
+// are the names shown in Crisp's "Advanced configuration" token screen.
+const CRISP_TOKEN_ID = process.env.CRISP_TOKEN_ID;
+const CRISP_TOKEN_KEY = process.env.CRISP_TOKEN_KEY;
 const CRISP_WEBSITE_ID = process.env.CRISP_WEBSITE_ID;
 
-if (!CRISP_IDENTIFIER || !CRISP_KEY || !CRISP_WEBSITE_ID) {
+if (!CRISP_TOKEN_ID || !CRISP_TOKEN_KEY || !CRISP_WEBSITE_ID) {
   console.error(
-    "Error: CRISP_IDENTIFIER, CRISP_KEY, and CRISP_WEBSITE_ID environment variables are required",
+    "Error: CRISP_TOKEN_ID, CRISP_TOKEN_KEY, and CRISP_WEBSITE_ID environment variables are required",
   );
   process.exit(1);
 }
 
 const crispClient = new CrispClient({
-  identifier: CRISP_IDENTIFIER,
-  key: CRISP_KEY,
+  identifier: CRISP_TOKEN_ID,
+  key: CRISP_TOKEN_KEY,
   websiteId: CRISP_WEBSITE_ID,
 });
 
@@ -553,7 +554,7 @@ function jsonResult(data: unknown): { content: [{ type: "text"; text: string }] 
 const server = new Server(
   {
     name: "crisp-mcp",
-    version: "1.2.0",
+    version: "2.0.0",
   },
   {
     capabilities: {
